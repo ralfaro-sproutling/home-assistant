@@ -19,9 +19,26 @@ BRAVIA_CONFIG_FILE = 'bravia.conf'
 
 CLIENTID_PREFIX = 'HomeAssistant'
 
+# Default values
 DEFAULT_NAME = 'Sony Bravia TV'
+DEFAULT_APPS_WHITELIST = []
+DEFAULT_EXTERNAL_AUDIO = False
+DEFAULT_SHOW_CONTROLS = True
+DEFAULT_IGNORED_SOURCES = []
+DEFAULT_SHOW_APPS = False
+DEFAULT_TERMINATE_APPS = False
 
 NICKNAME = 'Home Assistant'
+
+# Configurables
+CONF_PSK = 'psk'
+CONF_MAC = 'mac'
+CONF_EXTERNAL_AUDIO = 'external_audio'
+CONF_SHOW_CONTROLS = 'show_controls'
+CONF_IGNORED_SOURCES = 'ignored_sources'
+CONF_SHOW_APPS = 'show_apps'
+CONF_APPS_WHITELIST = 'apps_whitelist'
+CONF_TERMINATE_APPS = 'terminate_apps'
 
 # Map ip to request id for configuring
 _CONFIGURING = {}
@@ -37,6 +54,16 @@ SUPPORT_BRAVIA = SUPPORT_PAUSE | SUPPORT_VOLUME_STEP | \
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_HOST): cv.string,
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+    vol.Optional(CONF_PSK): cv.string,
+    vol.Optional(CONF_MAC): cv.string,
+    vol.Optional(CONF_EXTERNAL_AUDIO, default=DEFAULT_EXTERNAL_AUDIO): cv.boolean,
+    vol.Optional(CONF_SHOW_CONTROLS, default=DEFAULT_SHOW_CONTROLS): cv.boolean,
+    vol.Optional(CONF_IGNORED_SOURCES, default=DEFAULT_IGNORED_SOURCES):
+        vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional(CONF_SHOW_APPS, default=DEFAULT_SHOW_APPS): cv.boolean,
+    vol.Optional(CONF_APPS_WHITELIST, default=DEFAULT_APPS_WHITELIST):
+        vol.All(cv.ensure_list, [cv.string]),
+    vol.Optional(CONF_TERMINATE_APPS, default=DEFAULT_TERMINATE_APPS): cv.boolean,
 })
 
 
@@ -56,23 +83,47 @@ def _get_mac_address(ip_address):
 def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the Sony Bravia TV platform."""
     host = config.get(CONF_HOST)
+    name = config.get(CONF_NAME)
+    psk = config.get(CONF_PSK)
+    mac = config.get(CONF_MAC)
+    external_audio = config.get(CONF_EXTERNAL_AUDIO)
+    show_controls = config.get(CONF_SHOW_CONTROLS)
+    ignored_sources = config.get(CONF_IGNORED_SOURCES)
+    show_apps = config.get(CONF_SHOW_APPS)
+    apps_whitelist = config.get(CONF_APPS_WHITELIST)
+    terminate_apps = config.get(CONF_TERMINATE_APPS)
 
     if host is None:
         return
 
-    pin = None
-    bravia_config = load_json(hass.config.path(BRAVIA_CONFIG_FILE))
-    while bravia_config:
-        # Set up a configured TV
-        host_ip, host_config = bravia_config.popitem()
-        if host_ip == host:
-            pin = host_config['pin']
-            mac = host_config['mac']
-            name = config.get(CONF_NAME)
-            add_entities([BraviaTVDevice(host, mac, name, pin)])
-            return
+    if psk is not None:  # setup with psk
+        add_entities([BraviaTVDevice(host, mac, name, psk=psk,
+                                     external_audio=external_audio,
+                                     show_controls=show_controls,
+                                     ignored_sources=ignored_sources,
+                                     show_apps=show_apps,
+                                     apps_whitelist=apps_whitelist,
+                                     terminate_apps=terminate_apps)])
+    else:  # setup with pin
+        pin = None
+        bravia_config = load_json(hass.config.path(BRAVIA_CONFIG_FILE))
+        while bravia_config:
+            # Set up a configured TV
+            host_ip, host_config = bravia_config.popitem()
+            if host_ip == host:
+                pin = host_config['pin']
+                mac = host_config['mac']
+                name = config.get(CONF_NAME)
+                add_entities([BraviaTVDevice(host, mac, name, pin=pin,
+                                             external_audio=external_audio,
+                                             show_controls=show_controls,
+                                             ignored_sources=ignored_sources,
+                                             show_apps=show_apps,
+                                             apps_whitelist=apps_whitelist,
+                                             terminate_apps=terminate_apps)])
+                return
 
-    setup_bravia(config, pin, hass, add_entities)
+        setup_bravia(config, pin, hass, add_entities)
 
 
 def setup_bravia(config, pin, hass, add_entities):
@@ -140,12 +191,18 @@ def request_configuration(config, hass, add_entities):
 class BraviaTVDevice(MediaPlayerDevice):
     """Representation of a Sony Bravia TV."""
 
-    def __init__(self, host, mac, name, pin):
+    def __init__(self, host, mac, name, pin=None, psk=None, external_audio=False, show_controls=True, ignored_sources=None,
+                 show_apps=DEFAULT_SHOW_APPS, apps_whitelist=None, terminate_apps=DEFAULT_TERMINATE_APPS):
+
         """Initialize the Sony Bravia device."""
+        if pin is None and psk is None:
+            raise ValueError("Must provide PIN or PSK to connect!")
+
         from braviarc import braviarc
 
         self._pin = pin
-        self._braviarc = braviarc.BraviaRC(host, mac)
+        self._psk = psk
+        self._braviarc = braviarc.BraviaRC(host, mac, psk=psk)
         self._name = name
         self._state = STATE_OFF
         self._muted = False
@@ -156,6 +213,7 @@ class BraviaTVDevice(MediaPlayerDevice):
         self._source_list = []
         self._original_content_list = []
         self._content_mapping = {}
+        self._app_mapping = {}
         self._duration = None
         self._content_uri = None
         self._id = None
@@ -165,8 +223,15 @@ class BraviaTVDevice(MediaPlayerDevice):
         self._min_volume = None
         self._max_volume = None
         self._volume = None
+        self._external_audio = external_audio
+        self._show_controls = show_controls
+        self._ignored_sources = ignored_sources
+        self._show_apps = show_apps
+        self._apps_whitelist = apps_whitelist
+        self._terminate_apps = terminate_apps
 
-        self._braviarc.connect(pin, CLIENTID_PREFIX, NICKNAME)
+        if self._pin is not None:
+            self._braviarc.connect(pin, CLIENTID_PREFIX, NICKNAME)
         if self._braviarc.is_connected():
             self.update()
         else:
@@ -176,7 +241,8 @@ class BraviaTVDevice(MediaPlayerDevice):
         """Update TV info."""
         if not self._braviarc.is_connected():
             if self._braviarc.get_power_status() != 'off':
-                self._braviarc.connect(self._pin, CLIENTID_PREFIX, NICKNAME)
+                if self._pin is not None:
+                    self._braviarc.connect(self._pin, CLIENTID_PREFIX, NICKNAME)
             if not self._braviarc.is_connected():
                 return
 
@@ -231,12 +297,16 @@ class BraviaTVDevice(MediaPlayerDevice):
             self._muted = volume_info.get('mute')
 
     def _refresh_channels(self):
-        if not self._source_list:
-            self._content_mapping = self._braviarc. \
-                load_source_list()
-            self._source_list = []
-            for key in self._content_mapping:
+        self._content_mapping = self._braviarc.load_source_list()
+        self._app_mapping = self._braviarc.load_app_list()
+        self._source_list = []
+        for key in self._content_mapping:  # filter sources
+            if key not in self._ignored_sources:
                 self._source_list.append(key)
+        for key in self._app_mapping:  # filter apps
+            if not self._show_apps or (len(self._apps_whitelist) and key not in self._apps_whitelist):
+                continue
+            self._source_list.append(key)
 
     @property
     def name(self):
@@ -273,7 +343,12 @@ class BraviaTVDevice(MediaPlayerDevice):
     @property
     def supported_features(self):
         """Flag media player features that are supported."""
-        return SUPPORT_BRAVIA
+        supported = SUPPORT_BRAVIA
+        if self._external_audio:  # remove volume controls?
+            supported ^= (SUPPORT_VOLUME_MUTE | SUPPORT_VOLUME_SET | SUPPORT_VOLUME_STEP)
+        if not self._show_controls:  # remove media controls?
+            supported ^= (SUPPORT_PAUSE | SUPPORT_PLAY | SUPPORT_PREVIOUS_TRACK | SUPPORT_NEXT_TRACK)
+        return supported
 
     @property
     def media_title(self):
@@ -323,7 +398,11 @@ class BraviaTVDevice(MediaPlayerDevice):
         """Set the input source."""
         if source in self._content_mapping:
             uri = self._content_mapping[source]
-            self._braviarc.play_content(uri)
+        elif source in self._app_mapping:
+            uri = self._app_mapping[source]
+        else:
+            return
+        self._braviarc.play_content(uri, self._terminate_apps)
 
     def media_play_pause(self):
         """Simulate play pause media player."""
