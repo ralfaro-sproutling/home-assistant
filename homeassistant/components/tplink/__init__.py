@@ -13,22 +13,30 @@ _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = 'tplink'
 
+CONF_LIGHT = 'light'
+CONF_SWITCH = 'switch'
+CONF_DISCOVERY = 'discovery'
+CONF_SWITCH_IS_STRIP = 'switch_is_strip'
+
+ATTR_CONFIG = 'config'
+
+DEFAULT_SWITCH_IS_STRIP = True
+
 TPLINK_HOST_SCHEMA = vol.Schema({
     vol.Required(CONF_HOST): cv.string
 })
 
-CONF_LIGHT = 'light'
-CONF_SWITCH = 'switch'
-CONF_DISCOVERY = 'discovery'
-
-ATTR_CONFIG = 'config'
+TPLINK_SWITCH_HOST_SCHEMA = vol.Schema({
+    vol.Required(CONF_HOST): cv.string,
+    vol.Optional(CONF_SWITCH_IS_STRIP, default=DEFAULT_SWITCH_IS_STRIP): cv.boolean
+})
 
 CONFIG_SCHEMA = vol.Schema({
     DOMAIN: vol.Schema({
         vol.Optional('light', default=[]): vol.All(cv.ensure_list,
                                                    [TPLINK_HOST_SCHEMA]),
         vol.Optional('switch', default=[]): vol.All(cv.ensure_list,
-                                                    [TPLINK_HOST_SCHEMA]),
+                                                    [TPLINK_SWITCH_HOST_SCHEMA]),
         vol.Optional('discovery', default=True): cv.boolean,
     }),
 }, extra=vol.ALLOW_EXTRA)
@@ -60,7 +68,7 @@ async def async_setup(hass, config):
 
 async def async_setup_entry(hass, config_entry):
     """Set up TPLink from a config entry."""
-    from pyHS100 import SmartBulb, SmartPlug, SmartDeviceException
+    from pyHS100 import SmartBulb, SmartPlug, SmartStrip, SmartDeviceException
 
     devices = {}
 
@@ -84,6 +92,9 @@ async def async_setup_entry(hass, config_entry):
             dev = SmartBulb(host)
         elif type_ == CONF_SWITCH:
             dev = SmartPlug(host)
+        elif type_ == CONF_SWITCH_IS_STRIP:
+            _LOGGER.debug("***** SMART STRIP *****")
+            dev = SmartStrip(host)
 
         return dev
 
@@ -93,7 +104,11 @@ async def async_setup_entry(hass, config_entry):
             for entry in config_data[type_]:
                 try:
                     host = entry['host']
-                    dev = _device_for_type(host, type_)
+                    if entry.get(CONF_SWITCH_IS_STRIP, DEFAULT_SWITCH_IS_STRIP):
+                        _LOGGER.debug("***** CONFIG SWITCH IS STRIP *****")
+                        dev = _device_for_type(host, CONF_SWITCH_IS_STRIP)
+                    else:
+                        dev = _device_for_type(host, type_)
                     devices[host] = dev
                     _LOGGER.debug("Succesfully added %s %s: %s",
                                   type_, host, dev)
@@ -104,11 +119,13 @@ async def async_setup_entry(hass, config_entry):
     # This is necessary to avoid I/O blocking on is_dimmable
     def _fill_device_lists():
         for dev in devices.values():
-            if isinstance(dev, SmartPlug):
+            _LOGGER.debug("***** instance is: {}".format(type(dev)))
+            if isinstance(dev, SmartPlug) or isinstance(dev, SmartStrip):  # SmartStrip belongs in switch domain
                 try:
                     if dev.is_dimmable:  # Dimmers act as lights
                         lights.append(dev)
                     else:
+                        _LOGGER.debug("SWITCH {} ADDED TO SWITCHES".format(dev))
                         switches.append(dev)
                 except SmartDeviceException as ex:
                     _LOGGER.error("Unable to connect to device %s: %s",
